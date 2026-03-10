@@ -1,0 +1,483 @@
+#!/usr/bin/env python3
+"""
+时间管理大师 - 番茄钟与效率追踪 CLI 工具
+"""
+
+import argparse
+import sqlite3
+import os
+import sys
+import json
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional, List, Dict
+
+# 数据目录
+DATA_DIR = Path.home() / ".openclaw" / "data" / "time-management"
+DB_PATH = DATA_DIR / "time_management.db"
+
+# 默认配置
+DEFAULT_CONFIG = {
+    "pomodoro_duration": 25,  # 分钟
+    "short_break": 5,         # 分钟
+    "long_break": 15,         # 分钟
+    "long_break_interval": 4, # 每4个番茄钟后长休息
+    "auto_start_breaks": False,
+    "sound_enabled": True,
+    "notification_enabled": True
+}
+
+def init_db():
+    """初始化数据库"""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # 番茄钟记录表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS pomodoro_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_name TEXT,
+            duration INTEGER,  -- 实际专注时长（分钟）
+            start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            end_time TIMESTAMP,
+            category TEXT DEFAULT 'work',
+            completed BOOLEAN DEFAULT 1,
+            notes TEXT
+        )
+    ''')
+    
+    # 任务时间记录表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS task_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_name TEXT NOT NULL,
+            category TEXT DEFAULT 'general',
+            start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            end_time TIMESTAMP,
+            duration INTEGER,  -- 分钟
+            tags TEXT
+        )
+    ''')
+    
+    # 分类表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            color TEXT DEFAULT '#4A90D9',
+            description TEXT
+        )
+    ''')
+    
+    # 插入默认分类
+    default_categories = [
+        ('work', '#4A90D9', '工作'),
+        ('study', '#5CB85C', '学习'),
+        ('personal', '#F0AD4E', '个人'),
+        ('health', '#D9534F', '健康'),
+        ('entertainment', '#9B59B6', '娱乐')
+    ]
+    cursor.executemany('INSERT OR IGNORE INTO categories (name, color, description) VALUES (?, ?, ?)', 
+                       default_categories)
+    
+    conn.commit()
+    conn.close()
+
+def get_config_path() -> Path:
+    """获取配置文件路径"""
+    return DATA_DIR / "config.json"
+
+def load_config() -> Dict:
+    """加载配置"""
+    config_path = get_config_path()
+    if config_path.exists():
+        with open(config_path, 'r') as f:
+            return {**DEFAULT_CONFIG, **json.load(f)}
+    return DEFAULT_CONFIG.copy()
+
+def save_config(config: Dict):
+    """保存配置"""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(get_config_path(), 'w') as f:
+        json.dump(config, f, indent=2)
+
+def send_notification(title: str, message: str):
+    """发送系统通知"""
+    if sys.platform == "darwin":
+        os.system(f'''osascript -e 'display notification "{message}" with title "{title}"' ''')
+    elif sys.platform == "linux":
+        os.system(f'notify-send "{title}" "{message}"')
+
+def format_duration(minutes: int) -> str:
+    """格式化时长"""
+    if minutes < 60:
+        return f"{minutes}分钟"
+    hours = minutes // 60
+    mins = minutes % 60
+    if mins == 0:
+        return f"{hours}小时"
+    return f"{hours}小时{mins}分钟"
+
+def pomodoro_start(args):
+    """开始番茄钟"""
+    config = load_config()
+    duration = args.duration or config["pomodoro_duration"]
+    task_name = args.task or "专注任务"
+    category = args.category or "work"
+    
+    print(f"🍅 番茄钟开始: {task_name}")
+    print(f"⏱️  专注时长: {duration}分钟")
+    print(f"📂 分类: {category}")
+    print("-" * 40)
+    
+    start_time = datetime.now()
+    
+    # 倒计时显示
+    try:
+        for remaining in range(duration * 60, 0, -1):
+            mins, secs = divmod(remaining, 60)
+            print(f"\r⏳ 剩余: {mins:02d}:{secs:02d}", end='', flush=True)
+            time.sleep(1)
+        print()
+    except KeyboardInterrupt:
+        print("\n⏹️  番茄钟已取消")
+        return
+    
+    end_time = datetime.now()
+    
+    # 保存记录
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO pomodoro_sessions (task_name, duration, start_time, end_time, category, completed)
+        VALUES (?, ?, ?, ?, ?, 1)
+    ''', (task_name, duration, start_time, end_time, category))
+    conn.commit()
+    conn.close()
+    
+    # 发送通知
+    if config["notification_enabled"]:
+        send_notification("番茄钟完成", f"恭喜完成 {duration} 分钟专注！休息一下吧~")
+    
+    print(f"✅ 完成！专注了 {duration} 分钟")
+    
+    # 建议休息
+    print(f"☕ 建议休息 {config['short_break']} 分钟")
+
+def pomodoro_stats(args):
+    """查看番茄钟统计"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # 今日统计
+    today = datetime.now().strftime('%Y-%m-%d')
+    cursor.execute('''
+        SELECT COUNT(*), SUM(duration) FROM pomodoro_sessions
+        WHERE date(start_time) = date('now', 'localtime')
+    ''')
+    today_count, today_duration = cursor.fetchone()
+    today_duration = today_duration or 0
+    
+    # 本周统计
+    cursor.execute('''
+        SELECT COUNT(*), SUM(duration) FROM pomodoro_sessions
+        WHERE start_time >= date('now', 'localtime', '-7 days')
+    ''')
+    week_count, week_duration = cursor.fetchone()
+    week_duration = week_duration or 0
+    
+    # 分类统计
+    cursor.execute('''
+        SELECT category, COUNT(*), SUM(duration) FROM pomodoro_sessions
+        WHERE start_time >= date('now', 'localtime', '-7 days')
+        GROUP BY category
+        ORDER BY SUM(duration) DESC
+    ''')
+    category_stats = cursor.fetchall()
+    
+    conn.close()
+    
+    print("📊 番茄钟统计")
+    print("=" * 40)
+    print(f"📅 今日: {today_count or 0} 个番茄钟, 总时长 {format_duration(today_duration)}")
+    print(f"📆 本周: {week_count or 0} 个番茄钟, 总时长 {format_duration(week_duration)}")
+    print()
+    print("📂 本周分类统计:")
+    for cat, count, duration in category_stats:
+        print(f"  • {cat}: {count} 次, {format_duration(duration)}")
+
+def task_start(args):
+    """开始任务计时"""
+    task_name = args.task
+    category = args.category or "general"
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # 检查是否有未结束的任务
+    cursor.execute('''
+        SELECT id, task_name, start_time FROM task_logs
+        WHERE end_time IS NULL
+        ORDER BY start_time DESC LIMIT 1
+    ''')
+    active = cursor.fetchone()
+    
+    if active:
+        print(f"⚠️  当前有进行中的任务: {active[1]} (开始于 {active[2]})")
+        print("请先结束当前任务")
+        conn.close()
+        return
+    
+    # 开始新任务
+    cursor.execute('''
+        INSERT INTO task_logs (task_name, category, start_time)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+    ''', (task_name, category))
+    conn.commit()
+    conn.close()
+    
+    print(f"▶️  开始任务: {task_name}")
+    print(f"📂 分类: {category}")
+    print(f"🕐 开始时间: {datetime.now().strftime('%H:%M:%S')}")
+
+def task_stop(args):
+    """结束任务计时"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT id, task_name, start_time FROM task_logs
+        WHERE end_time IS NULL
+        ORDER BY start_time DESC LIMIT 1
+    ''')
+    active = cursor.fetchone()
+    
+    if not active:
+        print("ℹ️  没有进行中的任务")
+        conn.close()
+        return
+    
+    task_id, task_name, start_time = active
+    end_time = datetime.now()
+    
+    # 计算时长
+    start = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+    duration_minutes = int((end_time - start).total_seconds() / 60)
+    
+    cursor.execute('''
+        UPDATE task_logs SET end_time = CURRENT_TIMESTAMP, duration = ?
+        WHERE id = ?
+    ''', (duration_minutes, task_id))
+    conn.commit()
+    conn.close()
+    
+    print(f"⏹️  任务结束: {task_name}")
+    print(f"⏱️  用时: {format_duration(duration_minutes)}")
+
+def task_list(args):
+    """列出任务记录"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    limit = args.limit if hasattr(args, 'limit') else 10
+    
+    cursor.execute('''
+        SELECT task_name, category, start_time, end_time, duration
+        FROM task_logs
+        ORDER BY start_time DESC
+        LIMIT ?
+    ''', (limit,))
+    
+    tasks = cursor.fetchall()
+    conn.close()
+    
+    print("📝 最近任务记录")
+    print("=" * 60)
+    
+    for task_name, category, start, end, duration in tasks:
+        status = "✅" if end else "▶️ "
+        duration_str = format_duration(duration) if duration else "进行中"
+        print(f"{status} {task_name} [{category}]")
+        print(f"   开始: {start} | 时长: {duration_str}")
+        print()
+
+def report_daily(args):
+    """生成日报"""
+    date = args.date if hasattr(args, 'date') and args.date else datetime.now().strftime('%Y-%m-%d')
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    # 番茄钟统计
+    cursor.execute('''
+        SELECT COUNT(*), SUM(duration) FROM pomodoro_sessions
+        WHERE date(start_time) = ?
+    ''', (date,))
+    pomodoro_count, pomodoro_duration = cursor.fetchone()
+    pomodoro_duration = pomodoro_duration or 0
+    
+    # 任务统计
+    cursor.execute('''
+        SELECT category, SUM(duration) FROM task_logs
+        WHERE date(start_time) = ? AND duration IS NOT NULL
+        GROUP BY category
+    ''', (date,))
+    task_stats = cursor.fetchall()
+    
+    # 所有任务
+    cursor.execute('''
+        SELECT task_name, duration FROM task_logs
+        WHERE date(start_time) = ? AND duration IS NOT NULL
+        ORDER BY duration DESC
+    ''', (date,))
+    tasks = cursor.fetchall()
+    
+    conn.close()
+    
+    print(f"📊 {date} 效率报告")
+    print("=" * 50)
+    print()
+    print("🍅 番茄钟:")
+    print(f"   完成: {pomodoro_count or 0} 个")
+    print(f"   专注时长: {format_duration(pomodoro_duration)}")
+    print()
+    print("⏱️  任务时间分配:")
+    total_task_time = sum(d for _, d in task_stats if d) if task_stats else 0
+    for cat, duration in task_stats:
+        if duration:
+            pct = (duration / total_task_time * 100) if total_task_time else 0
+            bar = "█" * int(pct / 5)
+            print(f"   {cat}: {format_duration(duration)} ({pct:.1f}%) {bar}")
+    print()
+    print("📝 任务详情:")
+    for task_name, duration in tasks[:10]:
+        print(f"   • {task_name}: {format_duration(duration)}")
+
+def focus_mode(args):
+    """专注模式 - 屏蔽干扰"""
+    duration = args.duration if hasattr(args, 'duration') and args.duration else 25
+    
+    print("🔒 专注模式启动")
+    print(f"⏱️  时长: {duration} 分钟")
+    print("🚫 在此期间请避免查看通知")
+    print("-" * 40)
+    
+    # macOS 可以开启勿扰模式
+    if sys.platform == "darwin":
+        os.system('defaults -currentHost write ~/Library/Preferences/ByHost/com.apple.notificationcenterui doNotDisturb -boolean true')
+        print("✅ 已开启勿扰模式")
+    
+    try:
+        for remaining in range(duration * 60, 0, -1):
+            mins, secs = divmod(remaining, 60)
+            print(f"\r⏳ 专注中: {mins:02d}:{secs:02d}", end='', flush=True)
+            time.sleep(1)
+        print()
+    except KeyboardInterrupt:
+        print("\n⏹️  专注模式已退出")
+    finally:
+        if sys.platform == "darwin":
+            os.system('defaults -currentHost write ~/Library/Preferences/ByHost/com.apple.notificationcenterui doNotDisturb -boolean false')
+            print("✅ 已关闭勿扰模式")
+    
+    send_notification("专注模式结束", "专注时间结束，休息一下吧！")
+    print("✅ 专注模式完成！")
+
+def config_show(args):
+    """显示配置"""
+    config = load_config()
+    print("⚙️  当前配置:")
+    print(json.dumps(config, indent=2))
+
+def config_set(args):
+    """设置配置项"""
+    config = load_config()
+    config[args.key] = args.value
+    save_config(config)
+    print(f"✅ 已设置 {args.key} = {args.value}")
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog='time-management',
+        description='时间管理大师 - 番茄钟与效率追踪工具',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+示例:
+  time-management pomodoro --task "写代码" --duration 25
+  time-management task-start "学习Python" --category study
+  time-management task-stop
+  time-management stats
+  time-management report
+        '''
+    )
+    
+    subparsers = parser.add_subparsers(dest='command', help='可用命令')
+    
+    # 番茄钟命令
+    pomodoro_parser = subparsers.add_parser('pomodoro', help='开始番茄钟')
+    pomodoro_parser.add_argument('--task', '-t', help='任务名称')
+    pomodoro_parser.add_argument('--duration', '-d', type=int, help='专注时长(分钟)')
+    pomodoro_parser.add_argument('--category', '-c', help='任务分类')
+    
+    # 统计命令
+    stats_parser = subparsers.add_parser('stats', help='查看番茄钟统计')
+    
+    # 任务命令
+    task_start_parser = subparsers.add_parser('task-start', help='开始任务计时')
+    task_start_parser.add_argument('task', help='任务名称')
+    task_start_parser.add_argument('--category', '-c', default='general', help='任务分类')
+    
+    task_stop_parser = subparsers.add_parser('task-stop', help='结束任务计时')
+    
+    task_list_parser = subparsers.add_parser('tasks', help='列出任务记录')
+    task_list_parser.add_argument('--limit', '-n', type=int, default=10, help='显示数量')
+    
+    # 报告命令
+    report_parser = subparsers.add_parser('report', help='生成效率报告')
+    report_parser.add_argument('--date', help='指定日期 (YYYY-MM-DD)')
+    
+    # 专注模式
+    focus_parser = subparsers.add_parser('focus', help='开启专注模式')
+    focus_parser.add_argument('--duration', '-d', type=int, default=25, help='专注时长(分钟)')
+    
+    # 配置命令
+    config_parser = subparsers.add_parser('config', help='配置管理')
+    config_subparsers = config_parser.add_subparsers(dest='config_cmd')
+    config_show_parser = config_subparsers.add_parser('show', help='显示配置')
+    config_set_parser = config_subparsers.add_parser('set', help='设置配置项')
+    config_set_parser.add_argument('key', help='配置项名称')
+    config_set_parser.add_argument('value', help='配置值')
+    
+    args = parser.parse_args()
+    
+    # 初始化数据库
+    init_db()
+    
+    if args.command == 'pomodoro':
+        pomodoro_start(args)
+    elif args.command == 'stats':
+        pomodoro_stats(args)
+    elif args.command == 'task-start':
+        task_start(args)
+    elif args.command == 'task-stop':
+        task_stop(args)
+    elif args.command == 'tasks':
+        task_list(args)
+    elif args.command == 'report':
+        report_daily(args)
+    elif args.command == 'focus':
+        focus_mode(args)
+    elif args.command == 'config':
+        if args.config_cmd == 'show':
+            config_show(args)
+        elif args.config_cmd == 'set':
+            config_set(args)
+        else:
+            config_parser.print_help()
+    else:
+        parser.print_help()
+
+if __name__ == '__main__':
+    main()
