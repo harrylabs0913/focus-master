@@ -1,0 +1,16 @@
+{
+  "name": "focus-master",
+  "version": "1.0.0",
+  "description": "Personal productivity timer with Pomodoro technique, task tracking, and time analytics",
+  "main": "time-management",
+  "bin": {
+    "focus-master": "time-management"
+  },
+  "keywords": ["openclaw", "skill", "productivity", "pomodoro", "timer"],
+  "author": "harrylabs0913",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/harrylabs0913/focus-master.git"
+  }
+}
