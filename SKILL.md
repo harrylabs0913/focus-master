@@ -15,7 +15,7 @@ version: "1.0.0"
 
 ```bash
 # 添加到 PATH
-ln -s ~/.openclaw/workspace/skills/time-management/time-management ~/.local/bin/time-management
+ln -s ~/.openclaw/workspace/skills/focus-master/time-management ~/.local/bin/time-management
 ```
 
 ## 使用

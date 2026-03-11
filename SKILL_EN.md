@@ -22,7 +22,7 @@ Time Management Master helps you boost productivity with customizable Pomodoro t
 
 ```bash
 # Add to PATH
-ln -s ~/.openclaw/workspace/skills/time-management/time-management ~/.local/bin/time-management
+ln -s ~/.openclaw/workspace/skills/focus-master/time-management ~/.local/bin/time-management
 ```
 
 ## Usage
