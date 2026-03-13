@@ -1,6 +1,6 @@
 {
   "name": "focus-master",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Personal productivity timer with Pomodoro technique, task tracking, and time analytics",
   "main": "time-management",
   "bin": {
